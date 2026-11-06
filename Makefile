@@ -1,4 +1,4 @@
-.PHONY: all help build release test sign clean install preflight info submodules libkrun libkrunfw
+.PHONY: all help build release test bench check clippy fmt sign clean install preflight info submodules libkrun libkrunfw prereqs deps
 
 PREFIX ?= /usr/local/bin
 WORKSPACE_DIR := $(CURDIR)/krun-microvm
@@ -13,20 +13,32 @@ help:
 	@echo "Core Targets:"
 	@echo "  make build       - Compile all SDK workspace crates (debug mode)"
 	@echo "  make release     - Compile all SDK binaries with optimizations & codesign"
-	@echo "  make test        - Run all 129+ unit & integration tests"
+	@echo "  make test        - Run all unit & integration tests"
+	@echo "  make bench       - Run reproducible startup and isolation benchmarks"
+	@echo "  make check       - Type-check all workspace crates"
+	@echo "  make clippy      - Run clippy linter with strict flags (-D warnings)"
+	@echo "  make fmt         - Check code formatting across workspace"
 	@echo "  make sign        - Apply macOS Hypervisor.framework entitlement to binaries"
 	@echo "  make install     - Install all binaries (cro, microvm, runner, shim, operator)"
 	@echo "  make preflight   - Run system virtualization preflight validation"
 	@echo "  make info        - Display system, hypervisor, and microVM telemetry"
 	@echo "  make clean       - Remove compiled build artifacts"
 	@echo ""
-	@echo "Submodule Targets:"
-	@echo "  make submodules  - Initialize and update libkrun and libkrunfw submodules"
+	@echo "Submodule & Prerequisite Targets:"
+	@echo "  make prereqs     - Check/install system dependencies and initialize submodules"
+	@echo "  make deps        - Alias for make prereqs"
+	@echo "  make submodules  - Initialize and update libkrun and libkrunfw git submodules"
 	@echo "  make libkrun     - Build the libkrun C/Rust dynamic library submodule"
 	@echo "  make libkrunfw   - Build the libkrunfw firmware kernel submodule"
 
 submodules:
 	git submodule update --init --recursive
+
+prereqs: submodules
+	@echo "Checking system prerequisites..."
+	@./install.sh --prereqs-only --skip-submodules -y
+
+deps: prereqs
 
 build:
 	$(MAKE) -C $(WORKSPACE_DIR) build
@@ -36,6 +48,18 @@ release:
 
 test:
 	$(MAKE) -C $(WORKSPACE_DIR) test
+
+bench:
+	$(MAKE) -C $(WORKSPACE_DIR) bench
+
+check:
+	$(MAKE) -C $(WORKSPACE_DIR) check
+
+clippy:
+	$(MAKE) -C $(WORKSPACE_DIR) clippy
+
+fmt:
+	$(MAKE) -C $(WORKSPACE_DIR) fmt
 
 sign:
 	$(MAKE) -C $(WORKSPACE_DIR) sign

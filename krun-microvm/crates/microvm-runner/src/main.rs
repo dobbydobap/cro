@@ -94,14 +94,17 @@ fn validate_config(cfg: &RunnerConfig) -> Result<()> {
 fn run_vm(cfg: RunnerConfig) -> Result<()> {
     validate_config(&cfg)?;
 
-    let supervisor = match cfg.supervisor_sock_path.as_ref() {
-        Some(p) => Some(supervisor::SupervisorServer::start(p)?),
-        None => None,
-    };
-
     if let Some(level) = cfg.log_level {
         let _ = krun_sys::set_log_level(level);
     }
+
+    let mut ctx = KrunContext::create().context("Failed to create libkrun context")?;
+
+    let shutdown_efd = ctx.get_shutdown_eventfd().ok();
+    let supervisor = match cfg.supervisor_sock_path.as_ref() {
+        Some(p) => Some(supervisor::SupervisorServer::start(p, shutdown_efd)?),
+        None => None,
+    };
 
     // On Linux, if a CNI network namespace is specified, join it via setns prior to VM initialization
     #[cfg(target_os = "linux")]
@@ -136,15 +139,46 @@ fn run_vm(cfg: RunnerConfig) -> Result<()> {
         }
     }
 
-    let mut ctx = KrunContext::create().context("Failed to create libkrun context")?;
-
     ctx.set_vm_config(cfg.num_vcpus, cfg.ram_mib)
         .context("Failed to set VM resources")?;
 
-    // Attach any configured block disk devices
+    // Attach any configured block disk devices with multi-format and sync mode support
     for disk in &cfg.disks {
-        ctx.add_disk(&disk.id, &disk.path, disk.read_only)
-            .with_context(|| format!("Failed to add block disk '{}'", disk.id))?;
+        let format = disk.format as u32;
+        let sync_mode = disk.sync_mode as u32;
+        if disk.parallel_reads || disk.read_pool_size.is_some() {
+            ctx.add_disk4(
+                &disk.id,
+                &disk.path,
+                format,
+                disk.read_only,
+                disk.direct_io,
+                sync_mode,
+                disk.parallel_reads,
+                disk.read_pool_size.unwrap_or(0),
+            )
+            .with_context(|| {
+                format!(
+                    "Failed to add block disk '{}' with parallel reads (format: {:?}, sync: {:?}, pool: {:?})",
+                    disk.id, disk.format, disk.sync_mode, disk.read_pool_size
+                )
+            })?;
+        } else {
+            ctx.add_disk3(
+                &disk.id,
+                &disk.path,
+                format,
+                disk.read_only,
+                disk.direct_io,
+                sync_mode,
+            )
+            .with_context(|| {
+                format!(
+                    "Failed to add block disk '{}' (format: {:?}, sync: {:?})",
+                    disk.id, disk.format, disk.sync_mode
+                )
+            })?;
+        }
     }
 
     // Configure boot payload: OCI Rootfs, Direct Kernel, UEFI Firmware, or Unikernel
@@ -274,17 +308,69 @@ fn run_vm(cfg: RunnerConfig) -> Result<()> {
             .context("Failed to configure virtio-gpu options")?;
     }
 
-    // Configure virtio-fs directory shares
+    // Configure virtio-fs directory shares with DAX support
     for mount in &cfg.virtiofs_mounts {
-        if let Some(dax) = mount.dax_window_size_bytes.or(cfg.dax_window_size_bytes) {
+        let dax = mount
+            .dax_window_size_bytes
+            .or(cfg.dax_window_size_bytes)
+            .unwrap_or(0);
+        if dax > 0 {
             eprintln!(
                 "[microvm-runner] Enabled VirtioFS DAX window for '{}' ({} MB)",
                 mount.tag,
                 dax / (1024 * 1024)
             );
         }
-        ctx.add_virtiofs(&mount.tag, &mount.path, mount.read_only)
-            .with_context(|| format!("Failed to add virtiofs mount '{}'", mount.tag))?;
+        if mount.cache_policy.is_some() || mount.permission_semantics.is_some() {
+            let cache_policy = mount.cache_policy.unwrap_or_default().to_krun_sys();
+            let perm = mount.permission_semantics.unwrap_or_default().to_krun_sys();
+            ctx.add_virtiofs4(
+                &mount.tag,
+                &mount.path,
+                dax,
+                mount.read_only,
+                cache_policy,
+                perm,
+            )
+            .with_context(|| {
+                format!(
+                    "Failed to add virtiofs mount '{}' (cache: {:?}, permissions: {:?})",
+                    mount.tag, mount.cache_policy, mount.permission_semantics
+                )
+            })?;
+        } else {
+            ctx.add_virtiofs3(&mount.tag, &mount.path, dax, mount.read_only)
+                .with_context(|| format!("Failed to add virtiofs mount '{}'", mount.tag))?;
+        }
+    }
+
+    // Configure balloon free page reporting mode if specified
+    if let Some(mode) = cfg.balloon_reporting_mode {
+        ctx.set_balloon_free_page_reporting_mode(mode.to_krun_sys())
+            .with_context(|| {
+                format!(
+                    "Failed to set balloon free page reporting mode to {:?}",
+                    mode
+                )
+            })?;
+    }
+
+    // Configure in-memory virtual filesystem overlays
+    for overlay in &cfg.fs_overlays {
+        ctx.add_fs_overlay_file(
+            &overlay.fs_tag,
+            &overlay.path,
+            &overlay.data,
+            overlay.mode,
+            overlay.one_shot,
+        )
+        .with_context(|| format!("Failed to add fs overlay file '{}'", overlay.path))?;
+    }
+
+    // Configure SMBIOS OEM strings if provided
+    if !cfg.smbios_oem_strings.is_empty() {
+        ctx.set_smbios_oem_strings(&cfg.smbios_oem_strings)
+            .context("Failed to configure SMBIOS OEM strings")?;
     }
 
     // Configure optional console output logging

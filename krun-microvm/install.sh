@@ -35,13 +35,16 @@ log_step() {
     printf "\n${CYAN}${BOLD}==> %s${NC}\n" "$1"
 }
 
-# --- Determine Script and Workspace Directory ---
+# --- Determine Script, Root, and Workspace Directory ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "$SCRIPT_DIR/Cargo.toml" ] && grep -q "krun-microvm" "$SCRIPT_DIR/Cargo.toml" 2>/dev/null; then
-    WORKSPACE_DIR="$SCRIPT_DIR"
-elif [ -d "$SCRIPT_DIR/krun-microvm" ]; then
+if [ -f "$SCRIPT_DIR/krun-microvm/Cargo.toml" ]; then
+    ROOT_DIR="$SCRIPT_DIR"
     WORKSPACE_DIR="$SCRIPT_DIR/krun-microvm"
+elif [ -f "$SCRIPT_DIR/Cargo.toml" ]; then
+    WORKSPACE_DIR="$SCRIPT_DIR"
+    ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 else
+    ROOT_DIR="$SCRIPT_DIR"
     WORKSPACE_DIR="$SCRIPT_DIR"
 fi
 
@@ -50,7 +53,9 @@ cd "$WORKSPACE_DIR"
 # --- Default Options ---
 BUILD_MODE="release"
 DO_BUILD=true
+PREREQS_ONLY=false
 SKIP_DEPS=false
+SKIP_SUBMODULES=false
 AUTO_YES=false
 DO_SIGN=true
 PREFIX=""
@@ -67,7 +72,9 @@ ${BOLD}OPTIONS:${NC}
     --prefix <DIR>       Destination directory for binaries (default: /usr/local/bin or ~/.local/bin)
     --debug              Build with debug profile instead of release
     --no-build           Skip cargo build (use already compiled binaries from target/)
+    --prereqs-only       Check/install prerequisites and update submodules, then exit
     --skip-deps          Skip checking/installing system dependencies (libkrun, rust, etc.)
+    --skip-submodules    Skip updating git submodules (libkrun, libkrunfw)
     --no-sign            Skip macOS codesign with Hypervisor entitlements
     -y, --yes            Automatic yes to prompts (non-interactive mode)
     -h, --help           Show this help message and exit
@@ -85,11 +92,19 @@ ${BOLD}BINARIES INSTALLED:${NC}
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --prefix)
+            if [ "$#" -lt 2 ] || [ -z "$2" ] || [[ "$2" == -* ]]; then
+                log_error "--prefix requires a destination directory."
+                exit 1
+            fi
             PREFIX="$2"
             shift 2
             ;;
         --debug)
             BUILD_MODE="debug"
+            shift
+            ;;
+        --prereqs-only)
+            PREREQS_ONLY=true
             shift
             ;;
         --no-build)
@@ -98,6 +113,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip-deps)
             SKIP_DEPS=true
+            shift
+            ;;
+        --skip-submodules)
+            SKIP_SUBMODULES=true
             shift
             ;;
         --no-sign)
@@ -140,10 +159,30 @@ printf "${CYAN}${BOLD}     libkrun-microvm System Installation Tool        ${NC}
 printf "${BOLD}======================================================${NC}\n"
 printf "OS:                  ${BOLD}%s${NC}\n" "$OS"
 printf "Architecture:        ${BOLD}%s${NC}\n" "$ARCH"
+printf "Root Directory:      ${BOLD}%s${NC}\n" "$ROOT_DIR"
 printf "Workspace:           ${BOLD}%s${NC}\n" "$WORKSPACE_DIR"
 printf "Target Directory:    ${BOLD}%s${NC}\n" "$PREFIX"
 printf "Build Profile:       ${BOLD}%s${NC}\n" "$BUILD_MODE"
 printf "${BOLD}======================================================${NC}\n\n"
+
+# ==============================================================================
+# 0. GIT SUBMODULES UPDATE
+# ==============================================================================
+if [ "$SKIP_SUBMODULES" = false ]; then
+    if [ -d "$ROOT_DIR/.git" ] || [ -f "$ROOT_DIR/.git" ]; then
+        log_step "Updating Git Submodules (libkrun & libkrunfw)"
+        if command -v git &>/dev/null; then
+            log_info "Ensuring submodules are checked out in $ROOT_DIR..."
+            if ! (cd "$ROOT_DIR" && git submodule update --init --recursive); then
+                log_error "Git submodule update failed. Fix the error or use --skip-submodules to skip this step."
+                exit 1
+            fi
+            log_success "Submodules verified."
+        else
+            log_warn "git command not found; skipping submodule update."
+        fi
+    fi
+fi
 
 # ==============================================================================
 # 1. PREREQUISITE CHECK & INSTALLATION
@@ -263,6 +302,11 @@ else
     log_info "Skipping dependency checks (--skip-deps specified)."
 fi
 
+if [ "$PREREQS_ONLY" = true ]; then
+    log_success "Prerequisite checks completed. No binaries were built or installed."
+    exit 0
+fi
+
 # ==============================================================================
 # 2. CARGO BUILD
 # ==============================================================================
@@ -301,6 +345,12 @@ if [ "$OS" = "Darwin" ] && [ "$DO_SIGN" = true ]; then
     log_step "Applying macOS Hypervisor.framework Code Signing Entitlements"
     
     ENTITLEMENTS_FILE="$WORKSPACE_DIR/entitlements.plist"
+    if [ ! -f "$ENTITLEMENTS_FILE" ] && [ -f "$ROOT_DIR/krun-microvm/entitlements.plist" ]; then
+        ENTITLEMENTS_FILE="$ROOT_DIR/krun-microvm/entitlements.plist"
+    elif [ ! -f "$ENTITLEMENTS_FILE" ] && [ -f "$ROOT_DIR/entitlements.plist" ]; then
+        ENTITLEMENTS_FILE="$ROOT_DIR/entitlements.plist"
+    fi
+
     if [ -f "$ENTITLEMENTS_FILE" ]; then
         log_info "Signing binaries with $ENTITLEMENTS_FILE..."
         codesign --entitlements "$ENTITLEMENTS_FILE" --force -s - "$BIN_RUNNER"
@@ -309,7 +359,7 @@ if [ "$OS" = "Darwin" ] && [ "$DO_SIGN" = true ]; then
         codesign --entitlements "$ENTITLEMENTS_FILE" --force -s - "$BIN_OPERATOR"
         log_success "All binaries signed with com.apple.security.hypervisor entitlement."
     else
-        log_warn "entitlements.plist not found at $ENTITLEMENTS_FILE; skipping codesign."
+        log_warn "entitlements.plist not found; skipping codesign."
     fi
 fi
 

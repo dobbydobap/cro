@@ -1,3 +1,4 @@
+use super::digest::{sha256_hex, verify_sha256};
 use super::reference::ImageReference;
 use crate::config::OciConfig;
 use crate::rootfs::extract::extract_layer;
@@ -37,7 +38,10 @@ struct Platform {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub(crate) struct SingleManifest {
+    #[serde(rename = "artifactType")]
+    pub(crate) artifact_type: Option<String>,
     pub(crate) config: BlobDescriptor,
     pub(crate) layers: Vec<BlobDescriptor>,
 }
@@ -117,6 +121,15 @@ impl OciClient {
         super::artifact::pull_artifact_impl(self, reference, cache_base).await
     }
 
+    /// Pulls a CNCF ModelPack artifact into cache_base/models/<digest>.
+    pub async fn pull_model(
+        &self,
+        reference: &ImageReference,
+        cache_base: &Path,
+    ) -> Result<PathBuf> {
+        crate::modelpack::ModelEngine::pull_model(self, reference, cache_base).await
+    }
+
     /// Obtains an anonymous bearer token for pulling from any OCI compliant registry.
     pub(crate) async fn get_token(&self, reference: &ImageReference) -> Result<Option<String>> {
         // 1. Probe the registry /v2/ endpoint to receive standard Www-Authenticate challenge
@@ -139,6 +152,20 @@ impl OciClient {
         if reference.registry == "registry-1.docker.io" {
             let url = format!(
                 "https://auth.docker.io/token?service=registry.docker.io&scope=repository:{}:pull",
+                reference.repository
+            );
+            if let Ok(resp) = self.http.get(&url).send().await {
+                if resp.status().is_success() {
+                    let body: DockerTokenResponse = resp.json().await?;
+                    return Ok(body.token.or(body.access_token));
+                }
+            }
+        }
+
+        // 2b. Direct GHCR fallback if probe didn't return challenge
+        if reference.registry == "ghcr.io" {
+            let url = format!(
+                "https://ghcr.io/token?service=ghcr.io&scope=repository:{}:pull",
                 reference.repository
             );
             if let Ok(resp) = self.http.get(&url).send().await {
@@ -309,15 +336,14 @@ impl OciClient {
                 layer.digest
             );
 
-            let layer_hash = layer
-                .digest
-                .strip_prefix("sha256:")
-                .unwrap_or(&layer.digest);
+            let layer_hash = sha256_hex(&layer.digest)?;
             let blob_cache_file = cache_base.join("blobs").join("sha256").join(layer_hash);
 
             let blob_bytes = if blob_cache_file.exists() {
                 tracing::debug!("Layer blob cache hit: {}", layer.digest);
-                bytes::Bytes::from(std::fs::read(&blob_cache_file)?)
+                let cached = std::fs::read(&blob_cache_file)?;
+                verify_sha256(&layer.digest, &cached)?;
+                bytes::Bytes::from(cached)
             } else {
                 let downloaded = self
                     .fetch_blob_bytes(reference, &layer.digest, token_ref)
@@ -386,12 +412,38 @@ impl OciClient {
             ),
         );
 
-        let resp = self
+        let mut resp = self
             .http
             .get(&manifest_url)
             .headers(headers.clone())
             .send()
             .await?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            if let Some(auth_hdr) = resp.headers().get(WWW_AUTHENTICATE) {
+                if let Ok(hdr_str) = auth_hdr.to_str() {
+                    if let Ok(Some(tok)) =
+                        self.token_from_www_authenticate(hdr_str, reference).await
+                    {
+                        let mut retry_headers = self.auth_headers(Some(&tok));
+                        retry_headers.insert(
+                            ACCEPT,
+                            HeaderValue::from_static(
+                                "application/vnd.docker.distribution.manifest.v2+json, \
+                                 application/vnd.docker.distribution.manifest.list.v2+json, \
+                                 application/vnd.oci.image.manifest.v1+json, \
+                                 application/vnd.oci.image.index.v1+json",
+                            ),
+                        );
+                        resp = self
+                            .http
+                            .get(&manifest_url)
+                            .headers(retry_headers)
+                            .send()
+                            .await?;
+                    }
+                }
+            }
+        }
         if !resp.status().is_success() {
             bail!("Failed to fetch manifest: HTTP {}", resp.status());
         }
@@ -413,6 +465,9 @@ impl OciClient {
         // Check if this is an image index / multi-arch manifest list
         if let Ok(index) = serde_json::from_slice::<ManifestIndex>(&body_bytes) {
             if let Some(entries) = index.manifests {
+                if entries.is_empty() {
+                    bail!("Registry returned an empty manifest index");
+                }
                 let target_arch = match std::env::consts::ARCH {
                     "aarch64" => "arm64",
                     "x86_64" => "amd64",
@@ -439,13 +494,16 @@ impl OciClient {
                     }
                 };
 
+                sha256_hex(chosen_digest)?;
                 // Fetch the concrete single manifest for this platform
                 let child_url = format!(
                     "https://{}/v2/{}/manifests/{}",
                     reference.registry, reference.repository, chosen_digest
                 );
                 let child_resp = self.http.get(&child_url).headers(headers).send().await?;
+                let child_resp = child_resp.error_for_status()?;
                 let child_bytes = child_resp.bytes().await?;
+                verify_sha256(chosen_digest, &child_bytes)?;
                 let single: SingleManifest = serde_json::from_slice(&child_bytes)
                     .context("Failed to parse concrete single manifest")?;
                 return Ok((single, chosen_digest.clone()));
@@ -473,30 +531,33 @@ impl OciClient {
         digest: &str,
         token: Option<&str>,
     ) -> Result<bytes::Bytes> {
+        sha256_hex(digest)?;
         let url = format!(
             "https://{}/v2/{}/blobs/{}",
             reference.registry, reference.repository, digest
         );
 
         let headers = self.auth_headers(token);
-        let resp = self.http.get(&url).headers(headers).send().await?;
+        let mut resp = self.http.get(&url).headers(headers).send().await?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            if let Some(auth_hdr) = resp.headers().get(WWW_AUTHENTICATE) {
+                if let Ok(hdr_str) = auth_hdr.to_str() {
+                    if let Ok(Some(tok)) =
+                        self.token_from_www_authenticate(hdr_str, reference).await
+                    {
+                        let retry_headers = self.auth_headers(Some(&tok));
+                        resp = self.http.get(&url).headers(retry_headers).send().await?;
+                    }
+                }
+            }
+        }
         if !resp.status().is_success() {
             bail!("Failed to download blob {}: HTTP {}", digest, resp.status());
         }
 
         let bytes = resp.bytes().await?;
 
-        // Cryptographically verify SHA-256 digest of downloaded payload
-        if let Some(expected_hex) = digest.strip_prefix("sha256:") {
-            let actual_hex = format!("{:x}", Sha256::digest(&bytes));
-            if actual_hex != expected_hex {
-                bail!(
-                    "Cryptographic digest mismatch for blob: expected sha256:{}, got sha256:{}",
-                    expected_hex,
-                    actual_hex
-                );
-            }
-        }
+        verify_sha256(digest, &bytes)?;
 
         Ok(bytes)
     }

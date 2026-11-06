@@ -35,6 +35,26 @@ pub enum KrunError {
     SetGpuOptions(i32),
     #[error("Failed to add disk, error code: {0}")]
     AddDisk(i32),
+    #[error("Failed to add disk3, error code: {0}")]
+    AddDisk3(i32),
+    #[error("Failed to add disk4 with parallel reads, error code: {0}")]
+    AddDisk4(i32),
+    #[error("Failed to add virtiofs3, error code: {0}")]
+    AddVirtioFs3(i32),
+    #[error("Failed to add virtiofs4 with cache and permissions, error code: {0}")]
+    AddVirtioFs4(i32),
+    #[error("Failed to add fs overlay file, error code: {0}")]
+    AddFsOverlayFile(i32),
+    #[error("Failed to add fs overlay dir, error code: {0}")]
+    AddFsOverlayDir(i32),
+    #[error("Failed to set balloon free page reporting mode, error code: {0}")]
+    SetFreePageReportingMode(i32),
+    #[error("Failed to get shutdown eventfd, error code: {0}")]
+    GetShutdownEventfd(i32),
+    #[error("Failed to set SMBIOS OEM strings, error code: {0}")]
+    SetSmbiosOemStrings(i32),
+    #[error("Failed to query max vCPUs, error code: {0}")]
+    GetMaxVcpus(i32),
     #[error("Failed to set kernel, error code: {0}")]
     SetKernel(i32),
     #[error("Failed to set firmware, error code: {0}")]
@@ -56,6 +76,54 @@ pub mod kernel_formats {
     pub const KRUN_KERNEL_FORMAT_IMAGE_BZ2: u32 = 3;
     pub const KRUN_KERNEL_FORMAT_IMAGE_GZ: u32 = 4;
     pub const KRUN_KERNEL_FORMAT_IMAGE_ZSTD: u32 = 5;
+}
+
+pub mod disk_formats {
+    pub const KRUN_DISK_FORMAT_RAW: u32 = 0;
+    pub const KRUN_DISK_FORMAT_QCOW2: u32 = 1;
+    pub const KRUN_DISK_FORMAT_VMDK: u32 = 2;
+}
+
+pub mod sync_modes {
+    pub const KRUN_SYNC_NONE: u32 = 0;
+    pub const KRUN_SYNC_RELAXED: u32 = 1;
+    pub const KRUN_SYNC_FULL: u32 = 2;
+}
+
+pub mod features {
+    pub const KRUN_FEATURE_NET: u64 = 0;
+    pub const KRUN_FEATURE_BLK: u64 = 1;
+    pub const KRUN_FEATURE_GPU: u64 = 2;
+    pub const KRUN_FEATURE_SND: u64 = 3;
+    pub const KRUN_FEATURE_INPUT: u64 = 4;
+    pub const KRUN_FEATURE_EFI: u64 = 5;
+    pub const KRUN_FEATURE_TEE: u64 = 6;
+    pub const KRUN_FEATURE_AMD_SEV: u64 = 7;
+    pub const KRUN_FEATURE_INTEL_TDX: u64 = 8;
+    pub const KRUN_FEATURE_AWS_NITRO: u64 = 9;
+    pub const KRUN_FEATURE_RTC: u64 = 10;
+    pub const KRUN_FEATURE_PCI: u64 = 11;
+}
+
+pub mod cache_policies {
+    pub const KRUN_CACHE_POLICY_NEVER: u32 = 0;
+    pub const KRUN_CACHE_POLICY_AUTO: u32 = 1;
+    pub const KRUN_CACHE_POLICY_ALWAYS: u32 = 2;
+}
+
+pub mod permission_semantics {
+    pub const KRUN_PERMISSION_SEMANTICS_LINUX_COMPLETE: u32 = 0;
+    pub const KRUN_PERMISSION_SEMANTICS_LINUX_SIMPLIFIED: u32 = 1;
+}
+
+pub mod free_page_reporting_modes {
+    pub const KRUN_FREE_PAGE_REPORTING_MODE_DEFAULT: u32 = 0;
+    pub const KRUN_FREE_PAGE_REPORTING_MODE_REPLACE: u32 = 1;
+}
+
+pub mod net_flags {
+    pub const NET_FLAG_VFKIT: u32 = 1 << 0;
+    pub const NET_FLAG_DHCP_CLIENT: u32 = 1 << 1;
 }
 
 pub mod virgl_flags {
@@ -87,6 +155,33 @@ pub mod ffi {
             block_id: *const c_char,
             disk_path: *const c_char,
             read_only: bool,
+        ) -> i32;
+        pub fn krun_add_disk2(
+            ctx_id: u32,
+            block_id: *const c_char,
+            disk_path: *const c_char,
+            disk_format: u32,
+            read_only: bool,
+        ) -> i32;
+        pub fn krun_add_disk3(
+            ctx_id: u32,
+            block_id: *const c_char,
+            disk_path: *const c_char,
+            disk_format: u32,
+            read_only: bool,
+            direct_io: bool,
+            sync_mode: u32,
+        ) -> i32;
+        pub fn krun_add_disk4(
+            ctx_id: u32,
+            block_id: *const c_char,
+            disk_path: *const c_char,
+            disk_format: u32,
+            read_only: bool,
+            direct_io: bool,
+            sync_mode: u32,
+            parallel_reads: bool,
+            read_pool_size: usize,
         ) -> i32;
         pub fn krun_set_kernel(
             ctx_id: u32,
@@ -120,6 +215,42 @@ pub mod ffi {
             path: *const c_char,
             flags: u32,
         ) -> i32;
+        pub fn krun_add_virtiofs3(
+            ctx_id: u32,
+            tag: *const c_char,
+            path: *const c_char,
+            shm_size: u64,
+            read_only: bool,
+        ) -> i32;
+        pub fn krun_add_virtiofs4(
+            ctx_id: u32,
+            tag: *const c_char,
+            path: *const c_char,
+            shm_size: u64,
+            read_only: bool,
+            cache_policy: u32,
+            permission_semantics: u32,
+        ) -> i32;
+        pub fn krun_set_balloon_free_page_reporting_mode(ctx_id: u32, mode: u32) -> i32;
+        pub fn krun_fs_add_overlay_file(
+            ctx_id: u32,
+            fs_tag: *const c_char,
+            path: *const c_char,
+            data: *const u8,
+            data_len: usize,
+            mode: u32,
+            one_shot: bool,
+        ) -> i32;
+        pub fn krun_fs_add_overlay_dir(
+            ctx_id: u32,
+            fs_tag: *const c_char,
+            path: *const c_char,
+            mode: u32,
+        ) -> i32;
+        pub fn krun_get_shutdown_eventfd(ctx_id: u32) -> i32;
+        pub fn krun_set_smbios_oem_strings(ctx_id: u32, oem_strings: *const *const c_char) -> i32;
+        pub fn krun_has_feature(feature: u64) -> i32;
+        pub fn krun_get_max_vcpus() -> i32;
         pub fn krun_add_net_unixstream(
             ctx_id: u32,
             c_path: *const c_char,
@@ -144,6 +275,18 @@ pub fn set_log_level(level: u32) -> Result<(), KrunError> {
 
 pub fn check_nested_virt() -> bool {
     unsafe { ffi::krun_check_nested_virt() }
+}
+
+pub fn has_feature(feature: u64) -> bool {
+    unsafe { ffi::krun_has_feature(feature) == 1 }
+}
+
+pub fn get_max_vcpus() -> Result<u32, KrunError> {
+    let rc = unsafe { ffi::krun_get_max_vcpus() };
+    if rc <= 0 {
+        return Err(KrunError::GetMaxVcpus(rc));
+    }
+    Ok(rc as u32)
 }
 
 #[cfg(unix)]
@@ -461,6 +604,219 @@ impl KrunContext {
         Ok(())
     }
 
+    /// Retrieves the eventfd file descriptor used by libkrun for guest shutdown.
+    ///
+    /// Writing `1` (as a `u64`) to this file descriptor signals the microVM to
+    /// initiate an orderly ACPI / GPIO guest shutdown.
+    pub fn get_shutdown_eventfd(&self) -> Result<i32, KrunError> {
+        let fd = unsafe { ffi::krun_get_shutdown_eventfd(self.ctx_id) };
+        if fd < 0 {
+            return Err(KrunError::GetShutdownEventfd(fd));
+        }
+        Ok(fd)
+    }
+
+    /// Adds a block disk with full format, direct I/O, and sync mode options.
+    ///
+    /// Supported formats: `KRUN_DISK_FORMAT_RAW` (0), `KRUN_DISK_FORMAT_QCOW2` (1), `KRUN_DISK_FORMAT_VMDK` (2).
+    /// Supported sync modes: `KRUN_SYNC_NONE` (0), `KRUN_SYNC_RELAXED` (1, recommended on macOS), `KRUN_SYNC_FULL` (2).
+    pub fn add_disk3<P: AsRef<Path>>(
+        &mut self,
+        block_id: &str,
+        disk_path: P,
+        format: u32,
+        read_only: bool,
+        direct_io: bool,
+        sync_mode: u32,
+    ) -> Result<(), KrunError> {
+        let c_id = CString::new(block_id)?;
+        let c_path = path_to_cstring(disk_path.as_ref())?;
+        let rc = unsafe {
+            ffi::krun_add_disk3(
+                self.ctx_id,
+                c_id.as_ptr(),
+                c_path.as_ptr(),
+                format,
+                read_only,
+                direct_io,
+                sync_mode,
+            )
+        };
+        if rc != 0 {
+            return Err(KrunError::AddDisk3(rc));
+        }
+        Ok(())
+    }
+
+    /// Adds a block disk with full format, direct I/O, sync mode, and parallel reads configuration.
+    ///
+    /// When `parallel_reads` is true, read requests can be processed concurrently.
+    /// `read_pool_size` sets the worker thread pool size for reads (0 for default pool size).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_disk4<P: AsRef<Path>>(
+        &mut self,
+        block_id: &str,
+        disk_path: P,
+        format: u32,
+        read_only: bool,
+        direct_io: bool,
+        sync_mode: u32,
+        parallel_reads: bool,
+        read_pool_size: usize,
+    ) -> Result<(), KrunError> {
+        let c_id = CString::new(block_id)?;
+        let c_path = path_to_cstring(disk_path.as_ref())?;
+        let rc = unsafe {
+            ffi::krun_add_disk4(
+                self.ctx_id,
+                c_id.as_ptr(),
+                c_path.as_ptr(),
+                format,
+                read_only,
+                direct_io,
+                sync_mode,
+                parallel_reads,
+                read_pool_size,
+            )
+        };
+        if rc != 0 {
+            return Err(KrunError::AddDisk4(rc));
+        }
+        Ok(())
+    }
+
+    /// Adds an independent virtio-fs device with a configurable DAX shared memory window.
+    pub fn add_virtiofs3<P: AsRef<Path>>(
+        &mut self,
+        tag: &str,
+        path: P,
+        shm_size: u64,
+        read_only: bool,
+    ) -> Result<(), KrunError> {
+        let c_tag = CString::new(tag)?;
+        let c_path = path_to_cstring(path.as_ref())?;
+        let rc = unsafe {
+            ffi::krun_add_virtiofs3(
+                self.ctx_id,
+                c_tag.as_ptr(),
+                c_path.as_ptr(),
+                shm_size,
+                read_only,
+            )
+        };
+        if rc != 0 {
+            return Err(KrunError::AddVirtioFs3(rc));
+        }
+        Ok(())
+    }
+
+    /// Adds an independent virtio-fs device with a configurable DAX shared memory window,
+    /// cache policy, and POSIX permission semantics.
+    pub fn add_virtiofs4<P: AsRef<Path>>(
+        &mut self,
+        tag: &str,
+        path: P,
+        shm_size: u64,
+        read_only: bool,
+        cache_policy: u32,
+        permission_semantics: u32,
+    ) -> Result<(), KrunError> {
+        let c_tag = CString::new(tag)?;
+        let c_path = path_to_cstring(path.as_ref())?;
+        let rc = unsafe {
+            ffi::krun_add_virtiofs4(
+                self.ctx_id,
+                c_tag.as_ptr(),
+                c_path.as_ptr(),
+                shm_size,
+                read_only,
+                cache_policy,
+                permission_semantics,
+            )
+        };
+        if rc != 0 {
+            return Err(KrunError::AddVirtioFs4(rc));
+        }
+        Ok(())
+    }
+
+    /// Injects an in-memory file directly into the virtio-fs device overlay.
+    ///
+    /// If `one_shot` is true, the file vanishes from the filesystem once read by the guest.
+    pub fn add_fs_overlay_file(
+        &mut self,
+        fs_tag: &str,
+        path: &str,
+        data: &[u8],
+        mode: u32,
+        one_shot: bool,
+    ) -> Result<(), KrunError> {
+        let c_tag = CString::new(fs_tag)?;
+        let c_path = CString::new(path)?;
+        let rc = unsafe {
+            ffi::krun_fs_add_overlay_file(
+                self.ctx_id,
+                c_tag.as_ptr(),
+                c_path.as_ptr(),
+                data.as_ptr(),
+                data.len(),
+                mode,
+                one_shot,
+            )
+        };
+        if rc != 0 {
+            return Err(KrunError::AddFsOverlayFile(rc));
+        }
+        Ok(())
+    }
+
+    /// Adds a virtual directory inside the virtio-fs device overlay.
+    pub fn add_fs_overlay_dir(
+        &mut self,
+        fs_tag: &str,
+        path: &str,
+        mode: u32,
+    ) -> Result<(), KrunError> {
+        let c_tag = CString::new(fs_tag)?;
+        let c_path = CString::new(path)?;
+        let rc = unsafe {
+            ffi::krun_fs_add_overlay_dir(self.ctx_id, c_tag.as_ptr(), c_path.as_ptr(), mode)
+        };
+        if rc != 0 {
+            return Err(KrunError::AddFsOverlayDir(rc));
+        }
+        Ok(())
+    }
+
+    /// Injects custom OEM strings into the guest SMBIOS table.
+    pub fn set_smbios_oem_strings(&mut self, strings: &[String]) -> Result<(), KrunError> {
+        let mut c_strings = Vec::new();
+        for s in strings {
+            c_strings.push(CString::new(s.as_str())?);
+        }
+        let mut ptrs: Vec<*const c_char> = c_strings.iter().map(|s| s.as_ptr()).collect();
+        ptrs.push(std::ptr::null());
+
+        let rc = unsafe { ffi::krun_set_smbios_oem_strings(self.ctx_id, ptrs.as_ptr()) };
+        if rc != 0 {
+            return Err(KrunError::SetSmbiosOemStrings(rc));
+        }
+        Ok(())
+    }
+
+    /// Configures the memory balloon free page reporting mode.
+    ///
+    /// Modes:
+    /// - `free_page_reporting_modes::DEFAULT` (0): standard balloon behavior
+    /// - `free_page_reporting_modes::REPLACE` (1): host reclamation of guest freed pages
+    pub fn set_balloon_free_page_reporting_mode(&mut self, mode: u32) -> Result<(), KrunError> {
+        let rc = unsafe { ffi::krun_set_balloon_free_page_reporting_mode(self.ctx_id, mode) };
+        if rc != 0 {
+            return Err(KrunError::SetFreePageReportingMode(rc));
+        }
+        Ok(())
+    }
+
     /// Transitions the current process into the microVM supervisor.
     ///
     /// # Safety / Warning
@@ -519,5 +875,68 @@ mod tests {
             let p = Path::new(bad_path);
             assert!(path_to_cstring(p).is_err());
         }
+    }
+
+    #[test]
+    fn test_constants_definitions() {
+        assert_eq!(disk_formats::KRUN_DISK_FORMAT_RAW, 0);
+        assert_eq!(disk_formats::KRUN_DISK_FORMAT_QCOW2, 1);
+        assert_eq!(disk_formats::KRUN_DISK_FORMAT_VMDK, 2);
+
+        assert_eq!(sync_modes::KRUN_SYNC_NONE, 0);
+        assert_eq!(sync_modes::KRUN_SYNC_RELAXED, 1);
+        assert_eq!(sync_modes::KRUN_SYNC_FULL, 2);
+
+        assert_eq!(features::KRUN_FEATURE_NET, 0);
+        assert_eq!(features::KRUN_FEATURE_BLK, 1);
+        assert_eq!(features::KRUN_FEATURE_GPU, 2);
+        assert_eq!(features::KRUN_FEATURE_RTC, 10);
+        assert_eq!(features::KRUN_FEATURE_PCI, 11);
+
+        assert_eq!(cache_policies::KRUN_CACHE_POLICY_NEVER, 0);
+        assert_eq!(cache_policies::KRUN_CACHE_POLICY_AUTO, 1);
+        assert_eq!(cache_policies::KRUN_CACHE_POLICY_ALWAYS, 2);
+
+        assert_eq!(
+            permission_semantics::KRUN_PERMISSION_SEMANTICS_LINUX_COMPLETE,
+            0
+        );
+        assert_eq!(
+            permission_semantics::KRUN_PERMISSION_SEMANTICS_LINUX_SIMPLIFIED,
+            1
+        );
+
+        assert_eq!(
+            free_page_reporting_modes::KRUN_FREE_PAGE_REPORTING_MODE_DEFAULT,
+            0
+        );
+        assert_eq!(
+            free_page_reporting_modes::KRUN_FREE_PAGE_REPORTING_MODE_REPLACE,
+            1
+        );
+    }
+
+    #[test]
+    fn test_error_display() {
+        assert_eq!(
+            format!("{}", KrunError::AddDisk4(-5)),
+            "Failed to add disk4 with parallel reads, error code: -5"
+        );
+        assert_eq!(
+            format!("{}", KrunError::AddVirtioFs4(-6)),
+            "Failed to add virtiofs4 with cache and permissions, error code: -6"
+        );
+        assert_eq!(
+            format!("{}", KrunError::SetFreePageReportingMode(-7)),
+            "Failed to set balloon free page reporting mode, error code: -7"
+        );
+    }
+
+    #[test]
+    fn test_has_feature_and_max_vcpus() {
+        // In native or stub environment, has_feature and get_max_vcpus should return valid results
+        let _ = has_feature(features::KRUN_FEATURE_BLK);
+        let max_vcpus = get_max_vcpus();
+        assert!(max_vcpus.is_ok(), "max vCPUs query should succeed");
     }
 }

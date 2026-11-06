@@ -6,14 +6,115 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# ---------------------------------------------------------------------------
+#  Shared environment
+# ---------------------------------------------------------------------------
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
 jobs:
-  lint:
-    name: Code Quality & Lints
+  installer:
+    name: Installer (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check installer syntax
+        run: |
+          bash -n install.sh
+          bash -n krun-microvm/install.sh
+
+      - name: Run isolated installer tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Run Python SDK security tests
+        run: python3 -m unittest discover -s krun-microvm/sdks/python/tests -v
+
+  dependency-audit:
+    name: Rust dependency advisories
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - run: cargo install cargo-audit --version 0.22.2 --locked
+      - run: cargo audit --file krun-microvm/Cargo.lock --deny yanked
+
+  sdk-typescript:
+    name: TypeScript SDK
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: krun-microvm/sdks/typescript
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: krun-microvm/sdks/typescript/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - run: npm test
+      - run: npm audit --audit-level=low
+
+  sdk-go:
+    name: Go SDK
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: krun-microvm/sdks/go
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+      - run: go test ./...
+      - run: go vet ./...
+      - name: Audit embedded networking bridge
+        working-directory: krun-microvm/crates/libgvproxy-sys/gvproxy-bridge
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -scan=module
+
+  sdk-elixir:
+    name: Elixir HTTP security
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: krun-microvm/sdks/elixir
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27"
+          elixir-version: "1.18"
+      - run: mix test --warnings-as-errors
+
+  # =========================================================================
+  #  Formatting — fast gate, no deps needed beyond rustfmt
+  # =========================================================================
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     defaults:
       run:
         working-directory: krun-microvm
@@ -25,47 +126,114 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
-          components: rustfmt, clippy
+          components: rustfmt
+          cache: false
 
       - name: Check code formatting
         run: cargo fmt --all --check
 
-      - name: Run Clippy lints
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-  test:
-    name: Test Suite (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    needs: [lint]
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-14, ubuntu-latest]
+  # =========================================================================
+  #  Clippy — Fast linting gate with C stub
+  # =========================================================================
+  clippy:
+    name: Clippy Lints (Stub)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FORCE_LIBKRUN_STUB: "1"
     defaults:
       run:
         working-directory: krun-microvm
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Install Go toolchain
+        uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+          cache-dependency-path: krun-microvm/crates/libgvproxy-sys/gvproxy-bridge/go.sum
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
+
+      - name: Run Clippy lints
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # =========================================================================
+  #  Test Suite — Separated between Stub CI on Linux and Native on macOS
+  # =========================================================================
+  test:
+    name: Tests (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    needs: [fmt]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux (Stub)
+            os: ubuntu-latest
+            use_stub: "1"
+          - name: macOS (Native libkrun)
+            os: macos-14
+            use_stub: "0"
+    defaults:
+      run:
+        working-directory: krun-microvm
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
 
-      - name: Install macOS dependencies (libkrun)
+      - name: Install Go toolchain
+        uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+          cache-dependency-path: krun-microvm/crates/libgvproxy-sys/gvproxy-bridge/go.sum
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
+
+      - name: Install system dependencies and native libkrun (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew tap slp/krun || true
-          brew install libkrun || true
+          brew install protobuf
+          brew tap slp/krun
+          brew install libkrun
 
       - name: Run test suite
-        run: cargo test --workspace --verbose
+        env:
+          FORCE_LIBKRUN_STUB: ${{ matrix.use_stub }}
+        run: cargo test --locked --workspace --verbose
 
+  # =========================================================================
+  #  Build Release Binaries (Strictly Native — No Stubs)
+  # =========================================================================
   build-release:
-    name: Build Release Binaries (${{ matrix.target }})
+    name: Release Build (${{ matrix.artifact_name }})
     runs-on: ${{ matrix.os }}
-    needs: [test]
+    needs: [clippy, test]
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -82,6 +250,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -89,24 +259,56 @@ jobs:
           toolchain: stable
           target: ${{ matrix.target }}
 
-      - name: Install macOS dependencies (libkrun)
+      - name: Install Go toolchain
+        uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+          cache-dependency-path: krun-microvm/crates/libgvproxy-sys/gvproxy-bridge/go.sum
+
+      - name: Install system dependencies and build libkrun (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends protobuf-compiler libepoxy-dev libgbm-dev
+          # Build real libkrun submodule for native release linking
+          if [ -d "../libkrun" ]; then
+            make -C ../libkrun
+          fi
+
+      - name: Install system dependencies and native libkrun (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew tap slp/krun || true
-          brew install libkrun || true
+          brew install protobuf
+          brew tap slp/krun
+          brew install libkrun
 
-      - name: Build release binaries
-        run: cargo build --workspace --release
+      - name: Build release binaries (Real libkrun)
+        run: cargo build --locked --workspace --release --target ${{ matrix.target }}
+
+      - name: Verify release binary links to real libkrun (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          otool -L target/${{ matrix.target }}/release/microvm | grep -E "libkrun(\.dylib)?" || {
+            echo "ERROR: Release binary does not link against real libkrun dynamic library!";
+            exit 1;
+          }
 
       - name: Package release bundle
         run: |
           mkdir -p dist
-          cp target/release/microvm dist/
-          cp target/release/microvm-runner dist/
-          cp target/release/containerd-shim-krun-v2 dist/
-          cp target/release/krun-operator dist/
+          cp target/${{ matrix.target }}/release/microvm dist/
+          cp target/${{ matrix.target }}/release/microvm-runner dist/
+          cp target/${{ matrix.target }}/release/containerd-shim-krun-v2 dist/
+          cp target/${{ matrix.target }}/release/krun-operator dist/
           tar -czvf ${{ matrix.artifact_name }}.tar.gz -C dist .
-          shasum -a 256 ${{ matrix.artifact_name }}.tar.gz > ${{ matrix.artifact_name }}.tar.gz.sha256
+
+      - name: Generate checksum
+        run: |
+          if command -v sha256sum &>/dev/null; then
+            sha256sum ${{ matrix.artifact_name }}.tar.gz > ${{ matrix.artifact_name }}.tar.gz.sha256
+          else
+            shasum -a 256 ${{ matrix.artifact_name }}.tar.gz > ${{ matrix.artifact_name }}.tar.gz.sha256
+          fi
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
@@ -115,3 +317,4 @@ jobs:
           path: |
             krun-microvm/${{ matrix.artifact_name }}.tar.gz
             krun-microvm/${{ matrix.artifact_name }}.tar.gz.sha256
+          if-no-files-found: error

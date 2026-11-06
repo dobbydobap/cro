@@ -19,9 +19,19 @@ fn detect_libkrun() -> LibKrunVariant {
         }
     }
 
-    // 2. Local submodule build in workspace (e.g. libkrun/target/release)
+    // 2. pkg-config detection (supports /usr/local/lib/pkgconfig, Homebrew, distribution paths)
+    if pkg_config::Config::new().probe("libkrun").is_ok() {
+        return LibKrunVariant::PkgConfig;
+    }
+    if pkg_config::Config::new().probe("libkrun-efi").is_ok() {
+        return LibKrunVariant::PkgConfig;
+    }
+
+    // 3. Local submodule build in workspace (e.g. libkrun/target/release)
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
         let submodule_candidates = [
+            PathBuf::from(&manifest_dir).join("../../../libkrun/target/release"),
+            PathBuf::from(&manifest_dir).join("../../../libkrun/target/debug"),
             PathBuf::from(&manifest_dir).join("../../libkrun/target/release"),
             PathBuf::from(&manifest_dir).join("../../libkrun/target/debug"),
         ];
@@ -32,14 +42,6 @@ fn detect_libkrun() -> LibKrunVariant {
                 }
             }
         }
-    }
-
-    // 3. pkg-config detection (supports /usr/local/lib/pkgconfig, Homebrew, distribution paths)
-    if pkg_config::Config::new().probe("libkrun").is_ok() {
-        return LibKrunVariant::PkgConfig;
-    }
-    if pkg_config::Config::new().probe("libkrun-efi").is_ok() {
-        return LibKrunVariant::PkgConfig;
     }
 
     // 4. Standard filesystem candidate search paths
@@ -80,11 +82,19 @@ fn detect_libkrun() -> LibKrunVariant {
 
 fn main() {
     println!("cargo:rerun-if-changed=stub.c");
+    println!("cargo:rerun-if-changed=compat.c");
     println!("cargo:rerun-if-env-changed=LIBKRUN_DIR");
     println!("cargo:rerun-if-env-changed=FORCE_LIBKRUN_STUB");
     println!("cargo:rerun-if-env-changed=PKG_CONFIG_PATH");
 
-    let force_stub = std::env::var("FORCE_LIBKRUN_STUB").is_ok();
+    let force_stub = match std::env::var("FORCE_LIBKRUN_STUB").as_deref() {
+        Ok("1" | "true") => true,
+        Ok("0" | "false" | "") | Err(_) => false,
+        Ok(value) => panic!("Invalid FORCE_LIBKRUN_STUB value: {value:?}; use 1 or 0"),
+    };
+    if force_stub && std::env::var("PROFILE").as_deref() == Ok("release") {
+        panic!("Refusing to build release binaries with the libkrun test stub");
+    }
     let variant = if force_stub {
         LibKrunVariant::None
     } else {
@@ -95,18 +105,24 @@ fn main() {
         LibKrunVariant::Krun(custom_dir) => {
             println!("cargo:rustc-link-lib=dylib=krun");
             add_search_paths(custom_dir.as_deref());
+            cc::Build::new().file("compat.c").compile("krun_compat");
         }
         LibKrunVariant::KrunEfi(custom_dir) => {
             println!("cargo:rustc-link-lib=dylib=krun-efi");
             add_search_paths(custom_dir.as_deref());
+            cc::Build::new().file("compat.c").compile("krun_compat");
         }
         LibKrunVariant::PkgConfig => {
             // pkg_config has already emitted link-lib and search paths.
             // Add standard rpaths to ensure runtime dlopen succeeds.
             add_standard_rpaths();
+            cc::Build::new().file("compat.c").compile("krun_compat");
         }
         LibKrunVariant::None => {
-            println!("cargo:warning=libkrun native library not found; compiling fallback stub for test/CI compatibility");
+            if !force_stub {
+                panic!("Native libkrun library not found. Install libkrun or set LIBKRUN_DIR. For debug tests only, explicitly set FORCE_LIBKRUN_STUB=1.");
+            }
+            println!("cargo:warning=Explicit test mode: compiling libkrun stub; no hardware isolation is provided");
             cc::Build::new().file("stub.c").compile("krun");
         }
     }
@@ -117,6 +133,9 @@ fn add_search_paths(custom_dir: Option<&Path>) {
         let dir_str = dir.display().to_string();
         println!("cargo:rustc-link-search=native={dir_str}");
         println!("cargo:rustc-link-arg=-Wl,-rpath,{dir_str}");
+        if dir_str == "/opt/homebrew/lib" || dir_str == "/usr/local/lib" {
+            return;
+        }
     }
 
     #[cfg(target_os = "macos")]
